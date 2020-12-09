@@ -74,34 +74,11 @@ void CGIF::SaveState(Framework::CZipArchiveWriter& archive)
 	archive.InsertFile(registerFile);
 }
 
-void CGIF::FlushCurrentPacket()
-{
-	if(m_currentPath3Image != nullptr)
-	{
-		m_currentPath3Image->packets.emplace_back(std::move(m_currentPath3Packet));
-	}
-	else
-	{
-		m_currentPath3Packet = PATH3_PACKET();
-	}
-}
-
 void CGIF::WriteRegisterFilter(const CGSHandler::RegisterWrite& write)
 {
 	if(m_activePath == 3)
 	{
-		if(write.first == GS_REG_BITBLTBUF)
-		{
-			FlushCurrentPacket();
-			auto bitBltBuf = make_convertible<CGSHandler::BITBLTBUF>(write.second);
-			auto imageXfer = PATH3_IMAGE_XFER();
-			imageXfer.dstAddress = bitBltBuf.GetDstPtr();
-			m_path3Images.push_back(imageXfer);
-			auto xferIterator = m_path3Images.rbegin();
-			m_currentPath3Image = &(*xferIterator);
-		}
-		assert(m_currentPath3Image != nullptr);
-		m_currentPath3Packet.registerWrites.push_back(write);
+		m_path3RegisterWrites.push_back(write);
 	}
 	else
 	{
@@ -109,46 +86,31 @@ void CGIF::WriteRegisterFilter(const CGSHandler::RegisterWrite& write)
 		{
 			while(m_path3UnmaskCount != 0)
 			{
-				if(m_path3Images.empty()) break;
-				const auto& imageXfer = *m_path3Images.begin();
-				SendImageXfer(imageXfer);
-				if(m_currentPath3Image == &imageXfer)
+				auto nextTrxDir = std::find_if(m_path3RegisterWrites.begin(), m_path3RegisterWrites.end(),
+				                               [&](const auto& registerWrite) { return registerWrite.first == GS_REG_TRXDIR; });
+				if(nextTrxDir == m_path3RegisterWrites.end()) break;
+
+				auto registerBlockEnd = nextTrxDir + 1;
+				for(auto registerWriteIterator = m_path3RegisterWrites.begin();
+				    registerWriteIterator != registerBlockEnd; registerWriteIterator++)
 				{
-					m_currentPath3Image = nullptr;
+					m_gs->WriteRegister(*registerWriteIterator);
 				}
+
+				uint32 nextTrxDirPos = m_path3RegisterTransferCounter + (nextTrxDir - m_path3RegisterWrites.begin());
+				auto imageXferIterator = m_path3ImageXfers.find(nextTrxDirPos);
+				assert(imageXferIterator != m_path3ImageXfers.end());
+				m_gs->ProcessWriteBuffer(&CGsPacketMetadata(3));
+				if(imageXferIterator != m_path3ImageXfers.end())
+				{
+					m_gs->FeedImageData(imageXferIterator->second.contents.data(), imageXferIterator->second.contents.size());
+					m_path3ImageXfers.erase(imageXferIterator);
+				}
+
+				m_path3RegisterWrites.erase(m_path3RegisterWrites.begin(), registerBlockEnd);
+				m_path3RegisterTransferCounter = nextTrxDirPos + 1;
 				m_path3UnmaskCount--;
-				m_path3Images.pop_front();
 			}
-#if 0
-			static FILE* emitLog = fopen("emit_log.txt", "wb");
-			auto tex0 = make_convertible<CGSHandler::TEX0>(write.second);
-			fprintf(emitLog, "Preparing textures for %08x\r\n", tex0.GetBufPtr());
-			fprintf(emitLog, "-----------------------------------\r\n");
-			auto hasTextureTransfer = std::find_if(m_path3Images.begin(), m_path3Images.end(),
-			                                       [&](const auto& imageXfer) { return imageXfer.dstAddress == tex0.GetBufPtr(); }) != m_path3Images.end();
-			if(hasTextureTransfer)
-			{
-				for(auto imageXferIterator = m_path3Images.begin();
-				    imageXferIterator != m_path3Images.end();)
-				{
-					const auto& imageXfer = *imageXferIterator;
-					auto dstAddress = imageXfer.dstAddress;
-					fprintf(emitLog, "Sending transfer for %08x\r\n", dstAddress);
-					SendImageXfer(imageXfer);
-					if(m_currentPath3Image == &imageXfer)
-					{
-						m_currentPath3Image = nullptr;
-					}
-					imageXferIterator = m_path3Images.erase(imageXferIterator);
-					if(dstAddress == tex0.GetBufPtr())
-					{
-						break;
-					}
-				}
-				fprintf(emitLog, "-----------------------------------\r\n");
-				fflush(emitLog);
-			}
-#endif
 		}
 		m_gs->WriteRegister(write);
 	}
@@ -158,12 +120,13 @@ void CGIF::FeedImageDataFilter(const void* image, uint32 size)
 {
 	if(m_activePath == 3)
 	{
-		FlushCurrentPacket();
-		PATH3_PACKET packet;
-		packet.imageData =
-		    std::vector<uint8>(reinterpret_cast<const uint8*>(image), reinterpret_cast<const uint8*>(image) + size);
-		assert(m_currentPath3Image != nullptr);
-		m_currentPath3Image->packets.emplace_back(std::move(packet));
+		auto lastWriteIterator = m_path3RegisterWrites.rbegin();
+		assert(lastWriteIterator != std::rend(m_path3RegisterWrites));
+		const auto& lastWrite = *lastWriteIterator;
+		assert(lastWrite.first == GS_REG_TRXDIR);
+		auto& imageXfer = m_path3ImageXfers[m_path3RegisterWrites.size() - 1];
+		imageXfer.contents.insert(imageXfer.contents.begin(),
+		                          reinterpret_cast<const uint8*>(image), reinterpret_cast<const uint8*>(image) + size);
 	}
 	else
 	{
@@ -173,6 +136,7 @@ void CGIF::FeedImageDataFilter(const void* image, uint32 size)
 
 void CGIF::SendImageXfer(const PATH3_IMAGE_XFER& imageXfer)
 {
+#if 0
 	auto metadata = CGsPacketMetadata(3);
 	for(const auto& packet : imageXfer.packets)
 	{
@@ -192,6 +156,7 @@ void CGIF::SendImageXfer(const PATH3_IMAGE_XFER& imageXfer)
 			m_gs->FeedImageData(packet.imageData.data(), packet.imageData.size());
 		}
 	}
+#endif
 }
 
 uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
@@ -590,8 +555,9 @@ void CGIF::SetPath3Masked(bool masked)
 void CGIF::NotifyVBlankStart()
 {
 	m_path3UnmaskCount = 0;
-	m_path3Images.clear();
-	m_currentPath3Image = nullptr;
+	m_path3RegisterTransferCounter = 0;
+	m_path3RegisterWrites.clear();
+	m_path3ImageXfers.clear();
 }
 
 void CGIF::DisassembleGet(uint32 address)

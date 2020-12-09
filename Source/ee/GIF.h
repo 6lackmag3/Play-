@@ -68,19 +68,11 @@ private:
 		SIGNAL_STATE_PENDING,
 	};
 
-	struct PATH3_PACKET
-	{
-		std::vector<CGSHandler::RegisterWrite> registerWrites;
-		std::vector<uint8> imageData;
-	};
-
 	struct PATH3_IMAGE_XFER
 	{
-		uint32 dstAddress = 0;
-		std::vector<PATH3_PACKET> packets;
+		std::vector<uint8> contents;
 	};
 
-	void FlushCurrentPacket();
 	void WriteRegisterFilter(const CGSHandler::RegisterWrite&);
 	void FeedImageDataFilter(const void*, uint32);
 	void SendImageXfer(const PATH3_IMAGE_XFER&);
@@ -109,9 +101,8 @@ private:
 
 	CProfiler::ZoneHandle m_gifProfilerZone = 0;
 
-	std::list<PATH3_IMAGE_XFER> m_path3Images;
-
-	PATH3_PACKET m_currentPath3Packet;
-	PATH3_IMAGE_XFER* m_currentPath3Image = nullptr;
+	std::map<uint32, PATH3_IMAGE_XFER> m_path3ImageXfers;
+	std::vector<CGSHandler::RegisterWrite> m_path3RegisterWrites;
+	uint32 m_path3RegisterTransferCounter = 0;
 	uint32 m_path3UnmaskCount = 0;
 };
