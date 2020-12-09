@@ -55,6 +55,7 @@ public:
 	CGSHandler* GetGsHandler();
 
 	void SetPath3Masked(bool);
+	void NotifyVBlankStart();
 
 	void LoadState(Framework::CZipArchiveReader&);
 	void SaveState(Framework::CZipArchiveWriter&);
@@ -66,6 +67,23 @@ private:
 		SIGNAL_STATE_ENCOUNTERED,
 		SIGNAL_STATE_PENDING,
 	};
+
+	struct PATH3_PACKET
+	{
+		std::vector<CGSHandler::RegisterWrite> registerWrites;
+		std::vector<uint8> imageData;
+	};
+
+	struct PATH3_IMAGE_XFER
+	{
+		uint32 dstAddress = 0;
+		std::vector<PATH3_PACKET> packets;
+	};
+
+	void FlushCurrentPacket();
+	void WriteRegisterFilter(const CGSHandler::RegisterWrite&);
+	void FeedImageDataFilter(const void*, uint32);
+	void SendImageXfer(const PATH3_IMAGE_XFER&);
 
 	uint32 ProcessPacked(const uint8*, uint32, uint32);
 	uint32 ProcessRegList(const uint8*, uint32, uint32);
@@ -90,4 +108,10 @@ private:
 	CGSHandler*& m_gs;
 
 	CProfiler::ZoneHandle m_gifProfilerZone = 0;
+
+	std::list<PATH3_IMAGE_XFER> m_path3Images;
+
+	PATH3_PACKET m_currentPath3Packet;
+	PATH3_IMAGE_XFER* m_currentPath3Image = nullptr;
+	uint32 m_path3UnmaskCount = 0;
 };

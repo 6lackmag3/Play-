@@ -339,6 +339,7 @@ void CSubSystem::NotifyVBlankStart()
 {
 	m_timer.NotifyVBlankStart();
 	m_intc.AssertLine(CINTC::INTC_LINE_VBLANK_START);
+	m_gif.NotifyVBlankStart();
 	if(m_os->CheckVBlankFlag())
 	{
 		//Make sure a vblank start interrupt is serviced now because

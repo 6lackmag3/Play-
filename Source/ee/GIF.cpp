@@ -74,6 +74,126 @@ void CGIF::SaveState(Framework::CZipArchiveWriter& archive)
 	archive.InsertFile(registerFile);
 }
 
+void CGIF::FlushCurrentPacket()
+{
+	if(m_currentPath3Image != nullptr)
+	{
+		m_currentPath3Image->packets.emplace_back(std::move(m_currentPath3Packet));
+	}
+	else
+	{
+		m_currentPath3Packet = PATH3_PACKET();
+	}
+}
+
+void CGIF::WriteRegisterFilter(const CGSHandler::RegisterWrite& write)
+{
+	if(m_activePath == 3)
+	{
+		if(write.first == GS_REG_BITBLTBUF)
+		{
+			FlushCurrentPacket();
+			auto bitBltBuf = make_convertible<CGSHandler::BITBLTBUF>(write.second);
+			auto imageXfer = PATH3_IMAGE_XFER();
+			imageXfer.dstAddress = bitBltBuf.GetDstPtr();
+			m_path3Images.push_back(imageXfer);
+			auto xferIterator = m_path3Images.rbegin();
+			m_currentPath3Image = &(*xferIterator);
+		}
+		assert(m_currentPath3Image != nullptr);
+		m_currentPath3Packet.registerWrites.push_back(write);
+	}
+	else
+	{
+		if((write.first == GS_REG_TEX0_1) || (write.first == GS_REG_TEX0_2))
+		{
+			while(m_path3UnmaskCount != 0)
+			{
+				if(m_path3Images.empty()) break;
+				const auto& imageXfer = *m_path3Images.begin();
+				SendImageXfer(imageXfer);
+				if(m_currentPath3Image == &imageXfer)
+				{
+					m_currentPath3Image = nullptr;
+				}
+				m_path3UnmaskCount--;
+				m_path3Images.pop_front();
+			}
+#if 0
+			static FILE* emitLog = fopen("emit_log.txt", "wb");
+			auto tex0 = make_convertible<CGSHandler::TEX0>(write.second);
+			fprintf(emitLog, "Preparing textures for %08x\r\n", tex0.GetBufPtr());
+			fprintf(emitLog, "-----------------------------------\r\n");
+			auto hasTextureTransfer = std::find_if(m_path3Images.begin(), m_path3Images.end(),
+			                                       [&](const auto& imageXfer) { return imageXfer.dstAddress == tex0.GetBufPtr(); }) != m_path3Images.end();
+			if(hasTextureTransfer)
+			{
+				for(auto imageXferIterator = m_path3Images.begin();
+				    imageXferIterator != m_path3Images.end();)
+				{
+					const auto& imageXfer = *imageXferIterator;
+					auto dstAddress = imageXfer.dstAddress;
+					fprintf(emitLog, "Sending transfer for %08x\r\n", dstAddress);
+					SendImageXfer(imageXfer);
+					if(m_currentPath3Image == &imageXfer)
+					{
+						m_currentPath3Image = nullptr;
+					}
+					imageXferIterator = m_path3Images.erase(imageXferIterator);
+					if(dstAddress == tex0.GetBufPtr())
+					{
+						break;
+					}
+				}
+				fprintf(emitLog, "-----------------------------------\r\n");
+				fflush(emitLog);
+			}
+#endif
+		}
+		m_gs->WriteRegister(write);
+	}
+}
+
+void CGIF::FeedImageDataFilter(const void* image, uint32 size)
+{
+	if(m_activePath == 3)
+	{
+		FlushCurrentPacket();
+		PATH3_PACKET packet;
+		packet.imageData =
+		    std::vector<uint8>(reinterpret_cast<const uint8*>(image), reinterpret_cast<const uint8*>(image) + size);
+		assert(m_currentPath3Image != nullptr);
+		m_currentPath3Image->packets.emplace_back(std::move(packet));
+	}
+	else
+	{
+		m_gs->FeedImageData(image, size);
+	}
+}
+
+void CGIF::SendImageXfer(const PATH3_IMAGE_XFER& imageXfer)
+{
+	auto metadata = CGsPacketMetadata(3);
+	for(const auto& packet : imageXfer.packets)
+	{
+		bool isRegPacket = !packet.registerWrites.empty();
+		bool isImagePacket = !packet.imageData.empty();
+		assert(!(isRegPacket && isImagePacket));
+		if(isRegPacket)
+		{
+			for(const auto& write : packet.registerWrites)
+			{
+				m_gs->WriteRegister(write);
+			}
+		}
+		if(isImagePacket)
+		{
+			m_gs->ProcessWriteBuffer(&metadata);
+			m_gs->FeedImageData(packet.imageData.data(), packet.imageData.size());
+		}
+	}
+}
+
 uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
 {
 	uint32 start = address;
@@ -91,7 +211,7 @@ uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
 			{
 			case 0x00:
 				//PRIM
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_PRIM, packet.nV0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_PRIM, packet.nV0));
 				break;
 			case 0x01:
 				//RGBA
@@ -100,18 +220,18 @@ uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
 				temp |= (packet.nV[2] & 0xFF) << 16;
 				temp |= (packet.nV[3] & 0xFF) << 24;
 				temp |= ((uint64)m_qtemp << 32);
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_RGBAQ, temp));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_RGBAQ, temp));
 				break;
 			case 0x02:
 				//ST
 				m_qtemp = packet.nV2;
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_ST, packet.nD0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_ST, packet.nD0));
 				break;
 			case 0x03:
 				//UV
 				temp = (packet.nV[0] & 0x7FFF);
 				temp |= (packet.nV[1] & 0x7FFF) << 16;
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_UV, temp));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_UV, temp));
 				break;
 			case 0x04:
 				//XYZF2
@@ -121,11 +241,11 @@ uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
 				temp |= (uint64)(packet.nV[3] & 0x00000FF0) << 52;
 				if(packet.nV[3] & 0x8000)
 				{
-					m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_XYZF3, temp));
+					WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_XYZF3, temp));
 				}
 				else
 				{
-					m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_XYZF2, temp));
+					WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_XYZF2, temp));
 				}
 				break;
 			case 0x05:
@@ -135,36 +255,36 @@ uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
 				temp |= (uint64)(packet.nV[2] & 0xFFFFFFFF) << 32;
 				if(packet.nV[3] & 0x8000)
 				{
-					m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_XYZ3, temp));
+					WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_XYZ3, temp));
 				}
 				else
 				{
-					m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_XYZ2, temp));
+					WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_XYZ2, temp));
 				}
 				break;
 			case 0x06:
 				//TEX0_1
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_TEX0_1, packet.nD0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_TEX0_1, packet.nD0));
 				break;
 			case 0x07:
 				//TEX0_2
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_TEX0_2, packet.nD0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_TEX0_2, packet.nD0));
 				break;
 			case 0x08:
 				//CLAMP_1
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_CLAMP_1, packet.nD0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_CLAMP_1, packet.nD0));
 				break;
 			case 0x09:
 				//CLAMP_2
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_CLAMP_2, packet.nD0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_CLAMP_2, packet.nD0));
 				break;
 			case 0x0A:
 				//FOG
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_FOG, (packet.nD1 >> 36) << 56));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_FOG, (packet.nD1 >> 36) << 56));
 				break;
 			case 0x0D:
 				//XYZ3
-				m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_XYZ3, packet.nD0));
+				WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_XYZ3, packet.nD0));
 				break;
 			case 0x0E:
 				//A + D
@@ -182,7 +302,7 @@ uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
 						}
 						m_signalState = SIGNAL_STATE_ENCOUNTERED;
 					}
-					m_gs->WriteRegister(CGSHandler::RegisterWrite(reg, packet.nD0));
+					WriteRegisterFilter(CGSHandler::RegisterWrite(reg, packet.nD0));
 				}
 				break;
 			case 0x0F:
@@ -222,7 +342,7 @@ uint32 CGIF::ProcessRegList(const uint8* memory, uint32 address, uint32 end)
 			m_regsTemp--;
 
 			if(regDesc == 0x0F) continue;
-			m_gs->WriteRegister(CGSHandler::RegisterWrite(static_cast<uint8>(regDesc), packet));
+			WriteRegisterFilter(CGSHandler::RegisterWrite(static_cast<uint8>(regDesc), packet));
 		}
 
 		if(m_regsTemp == 0)
@@ -252,12 +372,12 @@ uint32 CGIF::ProcessImage(const uint8* memory, uint32 memorySize, uint32 address
 	bool requiresSplit = (address + xferSize) > memorySize;
 
 	uint32 firstXferSize = requiresSplit ? (memorySize - address) : xferSize;
-	m_gs->FeedImageData(memory + address, firstXferSize);
+	FeedImageDataFilter(memory + address, firstXferSize);
 
 	if(requiresSplit)
 	{
 		assert(xferSize > firstXferSize);
-		m_gs->FeedImageData(memory, xferSize - firstXferSize);
+		FeedImageDataFilter(memory, xferSize - firstXferSize);
 	}
 
 	m_loops -= totalLoops;
@@ -310,7 +430,7 @@ uint32 CGIF::ProcessSinglePacket(const uint8* memory, uint32 memorySize, uint32 
 			{
 				if(tag.pre != 0)
 				{
-					m_gs->WriteRegister(CGSHandler::RegisterWrite(GS_REG_PRIM, static_cast<uint64>(tag.prim)));
+					WriteRegisterFilter(CGSHandler::RegisterWrite(GS_REG_PRIM, static_cast<uint64>(tag.prim)));
 				}
 			}
 
@@ -460,7 +580,18 @@ CGSHandler* CGIF::GetGsHandler()
 
 void CGIF::SetPath3Masked(bool masked)
 {
+	if(m_path3Masked && !masked)
+	{
+		m_path3UnmaskCount += 2;
+	}
 	m_path3Masked = masked;
+}
+
+void CGIF::NotifyVBlankStart()
+{
+	m_path3UnmaskCount = 0;
+	m_path3Images.clear();
+	m_currentPath3Image = nullptr;
 }
 
 void CGIF::DisassembleGet(uint32 address)
