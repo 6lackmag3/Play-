@@ -22,6 +22,8 @@
 #define STATE_REGS_EOP ("EOP")
 #define STATE_REGS_QTEMP ("QTEMP")
 
+#define USE_PATH3_SEQUENCING
+
 CGIF::CGIF(CGSHandler*& gs, uint8* ram, uint8* spr)
     : m_qtemp(QTEMP_INIT)
     , m_ram(ram)
@@ -76,6 +78,7 @@ void CGIF::SaveState(Framework::CZipArchiveWriter& archive)
 
 void CGIF::WriteRegisterFilter(const CGSHandler::RegisterWrite& write)
 {
+#ifdef USE_PATH3_SEQUENCING
 	if(m_activePath == 3)
 	{
 		m_path3RegisterWrites.push_back(write);
@@ -114,10 +117,14 @@ void CGIF::WriteRegisterFilter(const CGSHandler::RegisterWrite& write)
 		}
 		m_gs->WriteRegister(write);
 	}
+#else
+	m_gs->WriteRegister(write);
+#endif
 }
 
 void CGIF::FeedImageDataFilter(const void* image, uint32 size)
 {
+#ifdef USE_PATH3_SEQUENCING
 	if(m_activePath == 3)
 	{
 		auto lastWriteIterator = m_path3RegisterWrites.rbegin();
@@ -132,6 +139,9 @@ void CGIF::FeedImageDataFilter(const void* image, uint32 size)
 	{
 		m_gs->FeedImageData(image, size);
 	}
+#else
+	m_gs->FeedImageData(image, size);
+#endif
 }
 
 void CGIF::SendImageXfer(const PATH3_IMAGE_XFER& imageXfer)
