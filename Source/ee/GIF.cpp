@@ -103,7 +103,10 @@ void CGIF::WriteRegisterFilter(const CGSHandler::RegisterWrite& write)
 				uint32 nextTrxDirPos = m_path3RegisterTransferCounter + (nextTrxDir - m_path3RegisterWrites.begin());
 				auto imageXferIterator = m_path3ImageXfers.find(nextTrxDirPos);
 				assert(imageXferIterator != m_path3ImageXfers.end());
-				m_gs->ProcessWriteBuffer(&CGsPacketMetadata(3));
+				{
+					auto packetMetadata = CGsPacketMetadata(3);
+					m_gs->ProcessWriteBuffer(&packetMetadata);
+				}
 				if(imageXferIterator != m_path3ImageXfers.end())
 				{
 					m_gs->FeedImageData(imageXferIterator->second.contents.data(), imageXferIterator->second.contents.size());
